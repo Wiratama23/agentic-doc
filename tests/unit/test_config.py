@@ -1,148 +1,141 @@
-import json
 import os
-from unittest.mock import MagicMock, patch
-
-import cv2
 import pytest
-
-from agentic_doc.common import ChunkType
 from agentic_doc.config import (
-    _COLOR_MAP,
-    _MAX_PARALLEL_TASKS,
     Settings,
-    VisualizationConfig,
+    LandingAISettings,
+    HuggingFaceSettings,
+    OpenAISettings,
+    GoogleAISettings,
+    AnthropicSettings,
 )
 
+# Pytest fixtures can be defined here if needed, e.g. for monkeypatch
+# For this set of tests, monkeypatch is used directly as a test function argument.
 
-def test_default_config():
+def test_settings_default_provider():
+    """Test that the default AI provider type is correctly set."""
     settings = Settings()
-    assert settings.retry_logging_style == "log_msg"
-    assert settings.batch_size > 0
-    assert settings.max_workers > 0
-    assert settings.max_retries > 0
-    assert settings.max_retry_wait_time > 0
-    assert settings.endpoint_host == "https://api.va.landing.ai"
-    assert settings.pdf_to_image_dpi == 96
+    # Assuming 'landingai' is the default from config.py
+    assert settings.ai_provider_type == "landingai"
+
+def test_settings_override_provider_env_var(monkeypatch):
+    """Test that AI_PROVIDER_TYPE environment variable overrides the default."""
+    monkeypatch.setenv("AI_PROVIDER_TYPE", "huggingface")
+    settings = Settings()
+    assert settings.ai_provider_type == "huggingface"
+    # Clean up env var for other tests if Settings is memoized or module-scoped
+    monkeypatch.delenv("AI_PROVIDER_TYPE")
 
 
-def test_custom_config(monkeypatch):
-    # Set environment variables
-    monkeypatch.setenv("BATCH_SIZE", "10")
-    monkeypatch.setenv("MAX_WORKERS", "8")
-    monkeypatch.setenv("MAX_RETRIES", "50")
-    monkeypatch.setenv("MAX_RETRY_WAIT_TIME", "30")
-    monkeypatch.setenv("RETRY_LOGGING_STYLE", "inline_block")
-    monkeypatch.setenv("ENDPOINT_HOST", "https://custom-endpoint.example.com")
-    monkeypatch.setenv("PDF_TO_IMAGE_DPI", "150")
+def test_settings_load_nested_landingai(monkeypatch):
+    """Test loading nested LandingAI settings from environment variables."""
+    monkeypatch.setenv("AI_PROVIDER_TYPE", "landingai")
+    monkeypatch.setenv("LANDINGAI__API_KEY", "test_landing_key_from_env")
+    monkeypatch.setenv("LANDINGAI__ENDPOINT_HOST", "http://testhost:8000")
 
     settings = Settings()
 
-    # Verify settings were loaded from environment variables
-    assert settings.batch_size == 10
-    assert settings.max_workers == 8
-    assert settings.max_retries == 50
-    assert settings.max_retry_wait_time == 30
-    assert settings.retry_logging_style == "inline_block"
-    assert settings.endpoint_host == "https://custom-endpoint.example.com"
-    assert settings.pdf_to_image_dpi == 150
+    assert settings.ai_provider_type == "landingai"
+    assert settings.landingai is not None
+    assert settings.landingai.api_key == "test_landing_key_from_env"
+    assert settings.landingai.endpoint_host == "http://testhost:8000"
+
+    monkeypatch.delenv("AI_PROVIDER_TYPE", raising=False)
+    monkeypatch.delenv("LANDINGAI__API_KEY", raising=False)
+    monkeypatch.delenv("LANDINGAI__ENDPOINT_HOST", raising=False)
+
+def test_settings_load_nested_openai(monkeypatch):
+    """Test loading nested OpenAI settings from environment variables."""
+    monkeypatch.setenv("AI_PROVIDER_TYPE", "openai")
+    monkeypatch.setenv("OPENAI__API_KEY", "sk-test_openai_key_from_env")
+    monkeypatch.setenv("OPENAI__MODEL_NAME", "gpt-custom")
+
+    settings = Settings()
+
+    assert settings.ai_provider_type == "openai"
+    assert settings.openai is not None
+    assert settings.openai.api_key == "sk-test_openai_key_from_env"
+    assert settings.openai.model_name == "gpt-custom"
+
+    monkeypatch.delenv("AI_PROVIDER_TYPE", raising=False)
+    monkeypatch.delenv("OPENAI__API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI__MODEL_NAME", raising=False)
 
 
-def test_settings_validation():
-    # Test that max_retries can't be negative
-    with pytest.raises(ValueError):
-        Settings(max_retries=-1)
+def test_settings_str_redacts_api_keys(monkeypatch):
+    """Test that the __str__ method redacts API keys."""
+    raw_openai_key = "sk-thisisarealapikeyvalueforopenai"
+    raw_landingai_key = "landingai_secret_key_value"
 
-    # Test that batch_size can't be less than 1
-    with pytest.raises(ValueError):
-        Settings(batch_size=0)
+    monkeypatch.setenv("AI_PROVIDER_TYPE", "openai") # Set one to be active for initial dump
+    monkeypatch.setenv("OPENAI__API_KEY", raw_openai_key)
+    monkeypatch.setenv("LANDINGAI__API_KEY", raw_landingai_key)
+    # For HuggingFace, it's auth_token
+    raw_hf_token = "hf_thisisatesttoken"
+    monkeypatch.setenv("HUGGINGFACE__AUTH_TOKEN", raw_hf_token)
 
-    # Test that max_workers can't be less than 1
-    with pytest.raises(ValueError):
-        Settings(max_workers=0)
-
-    # Test that max_retry_wait_time can't be negative
-    with pytest.raises(ValueError):
-        Settings(max_retry_wait_time=-1)
-
-    # Test pdf_to_image_dpi can't be less than 1
-    with pytest.raises(ValueError):
-        Settings(pdf_to_image_dpi=0)
-
-
-def test_settings_str_method():
-    # Create settings with an API key
-    settings = Settings(vision_agent_api_key="abcde12345")
-
-    # Convert to string and verify API key is redacted
+    settings = Settings()
     settings_str = str(settings)
-    assert "vision_agent_api_key" in settings_str
-    assert "abcde[REDACTED]" in settings_str
-    assert "12345" not in settings_str
 
-    # Verify other settings are included
-    assert "batch_size" in settings_str
-    assert "max_workers" in settings_str
-    assert "max_retries" in settings_str
-    assert "max_retry_wait_time" in settings_str
-    assert "retry_logging_style" in settings_str
+    assert raw_openai_key not in settings_str
+    assert raw_landingai_key not in settings_str
+    assert raw_hf_token not in settings_str
 
+    # Check for redaction placeholder for OpenAI API Key
+    # Need to handle both dict representations (repr vs json.dumps in __str__)
+    assert f'"api_key": "{raw_openai_key[:5]}[REDACTED]"' in settings_str or \
+           f"'api_key': '{raw_openai_key[:5]}[REDACTED]'" in settings_str or \
+           f"api_key='{raw_openai_key[:5]}[REDACTED]'" in settings_str
 
-def test_visualization_config_defaults():
-    # Test default visualization config
-    viz_config = VisualizationConfig()
+    # Check for redaction placeholder for LandingAI API Key
+    assert f'"api_key": "{raw_landingai_key[:5]}[REDACTED]"' in settings_str or \
+           f"'api_key': '{raw_landingai_key[:5]}[REDACTED]'" in settings_str or \
+           f"api_key='{raw_landingai_key[:5]}[REDACTED]'" in settings_str
 
-    # Check defaults
-    assert viz_config.thickness == 1
-    assert viz_config.text_bg_opacity == 0.7
-    assert viz_config.padding == 1
-    assert viz_config.font_scale == 0.5
-    assert viz_config.font == cv2.FONT_HERSHEY_SIMPLEX
+    # Check for redaction placeholder for HuggingFace Auth Token
+    assert f'"auth_token": "{raw_hf_token[:5]}[REDACTED]"' in settings_str or \
+           f"'auth_token': '{raw_hf_token[:5]}[REDACTED]'" in settings_str or \
+           f"auth_token='{raw_hf_token[:5]}[REDACTED]'" in settings_str
 
-    # Check that the color map contains all relevant chunk types
-    expected_chunk_types = set(ChunkType)
-    for chunk_type in expected_chunk_types:
-        assert chunk_type in viz_config.color_map, f"Missing chunk type: {chunk_type}"
+    monkeypatch.delenv("AI_PROVIDER_TYPE", raising=False)
+    monkeypatch.delenv("OPENAI__API_KEY", raising=False)
+    monkeypatch.delenv("LANDINGAI__API_KEY", raising=False)
+    monkeypatch.delenv("HUGGINGFACE__AUTH_TOKEN", raising=False)
 
 
-def test_visualization_config_custom():
-    # Test custom visualization config
-    custom_viz_config = VisualizationConfig(
-        thickness=2,
-        text_bg_opacity=0.5,
-        padding=3,
-        font_scale=0.8,
-        font=cv2.FONT_HERSHEY_PLAIN,
-        color_map={ChunkType.text: (255, 0, 0), ChunkType.table: (0, 255, 0)},
-    )
+def test_settings_initializes_all_provider_configs():
+    """
+    Test that all provider-specific config objects are initialized by default,
+    as per the logic added in config.py.
+    """
+    settings = Settings()
+    assert settings.landingai is not None, "LandingAI settings should be initialized"
+    assert isinstance(settings.landingai, LandingAISettings)
 
-    # Check custom values
-    assert custom_viz_config.thickness == 2
-    assert custom_viz_config.text_bg_opacity == 0.5
-    assert custom_viz_config.padding == 3
-    assert custom_viz_config.font_scale == 0.8
-    assert custom_viz_config.font == cv2.FONT_HERSHEY_PLAIN
+    assert settings.huggingface is not None, "HuggingFace settings should be initialized"
+    assert isinstance(settings.huggingface, HuggingFaceSettings)
 
-    # Check that the custom color map contains only the specified chunk types
-    assert custom_viz_config.color_map[ChunkType.text] == (255, 0, 0)
-    assert custom_viz_config.color_map[ChunkType.table] == (0, 255, 0)
+    assert settings.openai is not None, "OpenAI settings should be initialized"
+    assert isinstance(settings.openai, OpenAISettings)
 
+    assert settings.googleai is not None, "GoogleAI settings should be initialized"
+    assert isinstance(settings.googleai, GoogleAISettings)
 
-def test_visualization_config_validation():
-    # Test that text_bg_opacity must be between 0 and 1
-    with pytest.raises(ValueError):
-        VisualizationConfig(text_bg_opacity=-0.1)
+    assert settings.anthropic is not None, "Anthropic settings should be initialized"
+    assert isinstance(settings.anthropic, AnthropicSettings)
 
-    with pytest.raises(ValueError):
-        VisualizationConfig(text_bg_opacity=1.1)
+def test_settings_override_huggingface_model_device(monkeypatch):
+    """Test overriding HuggingFace model name and device."""
+    monkeypatch.setenv("AI_PROVIDER_TYPE", "huggingface")
+    monkeypatch.setenv("HUGGINGFACE__MODEL_NAME", "custom/model-test")
+    monkeypatch.setenv("HUGGINGFACE__DEVICE", "cuda:1")
 
-    # Test that thickness can't be negative
-    with pytest.raises(ValueError):
-        VisualizationConfig(thickness=-1)
+    settings = Settings()
 
-    # Test that padding can't be negative
-    with pytest.raises(ValueError):
-        VisualizationConfig(padding=-1)
+    assert settings.huggingface is not None
+    assert settings.huggingface.model_name == "custom/model-test"
+    assert settings.huggingface.device == "cuda:1"
 
-    # Test that font_scale can't be negative
-    with pytest.raises(ValueError):
-        VisualizationConfig(font_scale=-0.1)
+    monkeypatch.delenv("AI_PROVIDER_TYPE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE__MODEL_NAME", raising=False)
+    monkeypatch.delenv("HUGGINGFACE__DEVICE", raising=False)

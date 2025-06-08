@@ -1,10 +1,10 @@
 import json
 import logging
-from typing import Literal
+from typing import Literal, Optional
 
 import cv2
 import structlog
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agentic_doc.common import ChunkType
@@ -20,15 +20,39 @@ _COLOR_MAP = {
 }
 
 
+class LandingAISettings(BaseModel):
+    api_key: str = Field(default="", description="API key for LandingAI")
+    endpoint_host: str = Field(default="https://api.va.landing.ai", description="LandingAI endpoint host")
+
+
+class HuggingFaceSettings(BaseModel):
+    model_name: str = Field(default="", description="Name of the Hugging Face model to use")
+    device: str = Field(default="cpu", description="Device to run the Hugging Face model on (e.g., 'cpu', 'cuda')")
+    auth_token: Optional[str] = Field(default=None, description="Optional Hugging Face authentication token")
+
+
+class OpenAISettings(BaseModel):
+    api_key: str = Field(default="", description="API key for OpenAI")
+    model_name: str = Field(default="gpt-4-vision-preview", description="OpenAI model name")
+
+
+class GoogleAISettings(BaseModel):
+    api_key: str = Field(default="", description="API key for Google AI")
+    model_name: str = Field(default="gemini-pro-vision", description="Google AI model name")
+
+
+class AnthropicSettings(BaseModel):
+    api_key: str = Field(default="", description="API key for Anthropic")
+    model_name: str = Field(default="claude-3-opus-20240229", description="Anthropic model name")
+
+
 class Settings(BaseSettings):
-    endpoint_host: str = Field(
-        default="https://api.va.landing.ai",
-        description="The host of the endpoint to use",
-    )
-    vision_agent_api_key: str = Field(
-        description="API key for the vision agent",
-        default="",
-    )
+    ai_provider_type: str = Field(default="landingai", description="The type of AI provider to use (e.g., 'landingai', 'huggingface', 'openai')")
+    landingai: Optional[LandingAISettings] = None
+    huggingface: Optional[HuggingFaceSettings] = None
+    openai: Optional[OpenAISettings] = None
+    googleai: Optional[GoogleAISettings] = None
+    anthropic: Optional[AnthropicSettings] = None
     batch_size: int = Field(
         default=4,
         description="Number of documents to process in parallel",
@@ -68,19 +92,34 @@ class Settings(BaseSettings):
         env_file=".env",
         env_ignore_empty=True,
         extra="ignore",
+        env_nested_delimiter='__',
     )
 
     def __str__(self) -> str:
-        # Create a copy of dict with redacted API key
         settings_dict = self.model_dump()
-        if "vision_agent_api_key" in settings_dict:
-            settings_dict["vision_agent_api_key"] = (
-                settings_dict["vision_agent_api_key"][:5] + "[REDACTED]"
-            )
+        for provider_key in ["landingai", "openai", "googleai", "anthropic"]:
+            if provider_settings := settings_dict.get(provider_key):
+                if "api_key" in provider_settings and provider_settings["api_key"]:
+                    provider_settings["api_key"] = provider_settings["api_key"][:5] + "[REDACTED]"
+        if huggingface_settings := settings_dict.get("huggingface"):
+            if "auth_token" in huggingface_settings and huggingface_settings["auth_token"]:
+                huggingface_settings["auth_token"] = huggingface_settings["auth_token"][:5] + "[REDACTED]"
         return f"{json.dumps(settings_dict, indent=2)}"
 
 
 settings = Settings()
+
+if settings.landingai is None:
+    settings.landingai = LandingAISettings()
+if settings.huggingface is None:
+    settings.huggingface = HuggingFaceSettings()
+if settings.openai is None:
+    settings.openai = OpenAISettings()
+if settings.googleai is None:
+    settings.googleai = GoogleAISettings()
+if settings.anthropic is None:
+    settings.anthropic = AnthropicSettings()
+
 _LOGGER.info(f"Settings loaded: {settings}")
 
 if settings.batch_size * settings.max_workers > _MAX_PARALLEL_TASKS:

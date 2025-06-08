@@ -1,3 +1,4 @@
+import importlib.metadata
 import time
 from enum import Enum
 from pathlib import Path
@@ -90,3 +91,6 @@ class Timer:
 
     def __exit__(self, *args: Any) -> None:
         self.elapsed = time.perf_counter() - self.start
+
+
+_LIB_VERSION = importlib.metadata.version("agentic-doc")

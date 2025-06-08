@@ -1,16 +1,13 @@
 import copy
-import importlib.metadata
 import tempfile
 import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
-import httpx
 import structlog
-import tenacity
 from pydantic_core import Url
 from tqdm import tqdm
 
@@ -18,10 +15,9 @@ from agentic_doc.common import (
     Document,
     PageError,
     ParsedDocument,
-    RetryableError,
-    Timer,
 )
 from agentic_doc.config import settings
+from agentic_doc.ai_providers import BaseAIProvider, get_ai_provider
 from agentic_doc.connectors import (
     BaseConnector,
     ConnectorConfig,
@@ -38,8 +34,7 @@ from agentic_doc.utils import (
 )
 
 _LOGGER = structlog.getLogger(__name__)
-_ENDPOINT_URL = f"{settings.endpoint_host}/v1/tools/agentic-document-analysis"
-_LIB_VERSION = importlib.metadata.version("agentic-doc")
+# _ENDPOINT_URL, _LIB_VERSION and hardcoded _AI_PROVIDER are removed.
 
 
 def parse(
@@ -81,7 +76,8 @@ def parse(
     Returns:
         List[ParsedDocument]
     """
-    check_endpoint_and_api_key(_ENDPOINT_URL)
+    # Get the AI provider using the factory function
+    ai_provider = get_ai_provider()
 
     # Convert input to list of document paths
     doc_paths = _get_document_paths(documents, connector_path, connector_pattern)
@@ -93,6 +89,7 @@ def parse(
     # Parse all documents
     parse_results = _parse_document_list(
         doc_paths,
+        ai_provider=ai_provider, # Pass the provider
         include_marginalia=include_marginalia,
         include_metadata_in_markdown=include_metadata_in_markdown,
         result_save_dir=result_save_dir,
@@ -190,6 +187,7 @@ def _convert_to_parsed_documents(
 def _parse_document_list(
     documents: Sequence[Union[str, Path, Url]],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
     result_save_dir: Optional[Union[str, Path]] = None,
@@ -200,6 +198,7 @@ def _parse_document_list(
     if result_save_dir:
         return parse_and_save_documents(
             documents_list,
+            ai_provider=ai_provider, # Pass provider
             result_save_dir=result_save_dir,
             grounding_save_dir=grounding_save_dir,
             include_marginalia=include_marginalia,
@@ -208,6 +207,7 @@ def _parse_document_list(
     else:
         return parse_documents(
             documents_list,
+            ai_provider=ai_provider, # Pass provider
             include_marginalia=include_marginalia,
             include_metadata_in_markdown=include_metadata_in_markdown,
             grounding_save_dir=grounding_save_dir,
@@ -217,22 +217,25 @@ def _parse_document_list(
 def parse_documents(
     documents: list[Union[str, Path, Url]],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
     grounding_save_dir: Union[str, Path, None] = None,
 ) -> list[ParsedDocument]:
     """
-    Parse a list of documents using the Landing AI Agentic Document Analysis API.
+    Parse a list of documents using the specified AI provider.
 
     Args:
-        documents (list[str | Path | Url]): The list of documents to parse. Each document can be a local file path, a URL string, or a Pydantic `Url` object.
+        documents (list[str | Path | Url]): The list of documents to parse.
+        ai_provider (BaseAIProvider): The AI provider instance to use for parsing.
         grounding_save_dir (str | Path): The local directory to save the grounding images.
     Returns:
-        list[ParsedDocument]: The list of parsed documents. The list is sorted by the order of the input documents.
+        list[ParsedDocument]: The list of parsed documents.
     """
     _LOGGER.info(f"Parsing {len(documents)} documents")
     _parse_func = partial(
         parse_and_save_document,
+        ai_provider=ai_provider, # Pass provider
         include_marginalia=include_marginalia,
         include_metadata_in_markdown=include_metadata_in_markdown,
         grounding_save_dir=grounding_save_dir,
@@ -250,6 +253,7 @@ def parse_documents(
 def parse_and_save_documents(
     documents: list[Union[str, Path, Url]],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     result_save_dir: Union[str, Path],
     grounding_save_dir: Union[str, Path, None] = None,
     include_marginalia: bool = True,
@@ -259,16 +263,17 @@ def parse_and_save_documents(
     Parse a list of documents and save the results to a local directory.
 
     Args:
-        documents (list[str | Path | Url]): The list of documents to parse. Each document can be a local file path, a URL string, or a Pydantic `Url` object.
+        documents (list[str | Path | Url]): The list of documents to parse.
+        ai_provider (BaseAIProvider): The AI provider instance to use for parsing.
         result_save_dir (str | Path): The local directory to save the results.
         grounding_save_dir (str | Path): The local directory to save the grounding images.
     Returns:
-        list[Path]: A list of json file paths to the saved results. The file paths are sorted by the order of the input file paths.
-            The file name is the original file name with a timestamp appended. E.g. "document.pdf" -> "document_20250313_123456.json".
+        list[Path]: A list of json file paths to the saved results.
     """
     _LOGGER.info(f"Parsing {len(documents)} documents")
     _parse_func = partial(
         parse_and_save_document,
+        ai_provider=ai_provider, # Pass provider
         include_marginalia=include_marginalia,
         include_metadata_in_markdown=include_metadata_in_markdown,
         result_save_dir=result_save_dir,
@@ -287,6 +292,7 @@ def parse_and_save_documents(
 def parse_and_save_document(
     document: Union[str, Path, Url],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
     result_save_dir: Union[str, Path, None] = None,
@@ -296,7 +302,8 @@ def parse_and_save_document(
     Parse a document and save the results to a local directory.
 
     Args:
-        document (str | Path | Url): The document to parse. It can be a local file path, a URL string, or a Pydantic `Url` object.
+        document (str | Path | Url): The document to parse.
+        ai_provider (BaseAIProvider): The AI provider instance to use for parsing.
         result_save_dir (str | Path): The local directory to save the results. If None, the parsed document data is returned.
 
     Returns:
@@ -320,12 +327,14 @@ def parse_and_save_document(
         if file_type == "image":
             result = _parse_image(
                 document,
+                ai_provider=ai_provider, # Pass provider
                 include_marginalia=include_marginalia,
                 include_metadata_in_markdown=include_metadata_in_markdown,
             )
         elif file_type == "pdf":
             result = _parse_pdf(
                 document,
+                ai_provider=ai_provider, # Pass provider
                 include_marginalia=include_marginalia,
                 include_metadata_in_markdown=include_metadata_in_markdown,
             )
@@ -354,6 +363,7 @@ def parse_and_save_document(
 def _parse_pdf(
     file_path: Union[str, Path],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
 ) -> ParsedDocument:
@@ -362,6 +372,7 @@ def _parse_pdf(
         file_path = Path(file_path)
         part_results = _parse_doc_in_parallel(
             parts,
+            ai_provider=ai_provider, # Pass provider
             doc_name=file_path.name,
             include_marginalia=include_marginalia,
             include_metadata_in_markdown=include_metadata_in_markdown,
@@ -372,26 +383,28 @@ def _parse_pdf(
 def _parse_image(
     file_path: Union[str, Path],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
 ) -> ParsedDocument:
     try:
-        result_raw = _send_parsing_request(
-            str(file_path),
-            include_marginalia=include_marginalia,
-            include_metadata_in_markdown=include_metadata_in_markdown,
-        )
-        result_raw = {
-            **result_raw["data"],
-            "errors": result_raw.get("errors", []),
-            "doc_type": "image",
-            "start_page_idx": 0,
+        options = {
+            "include_marginalia": include_marginalia,
+            "include_metadata_in_markdown": include_metadata_in_markdown,
+            "doc_type": "image", # This specific file is an image
+            "start_page_idx": 0, # Images are single page in this context
             "end_page_idx": 0,
         }
-        return ParsedDocument.model_validate(result_raw)
+        parsed_doc = ai_provider.analyze_document(str(file_path), options)
+        if parsed_doc.errors:
+             for err in parsed_doc.errors:
+                _LOGGER.error(f"Provider error parsing image '{file_path}': {err.error_code} - {err.error}", page_num=err.page_num)
+        return parsed_doc
     except Exception as e:
+        # This catches errors from the analyze_document call itself (e.g., network issues not caught by tenacity, unexpected provider issues)
+        # The provider's analyze_document is expected to return a ParsedDocument with errors for API-level errors.
         error_msg = str(e)
-        _LOGGER.error(f"Error parsing image '{file_path}' due to: {error_msg}")
+        _LOGGER.error(f"Exception during image parsing with AI provider '{file_path}': {error_msg}")
         return ParsedDocument(
             markdown="",
             chunks=[],
@@ -439,12 +452,14 @@ def _merge_next_part(curr: ParsedDocument, next: ParsedDocument) -> None:
 def _parse_doc_in_parallel(
     doc_parts: list[Document],
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     doc_name: str,
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
 ) -> list[ParsedDocument]:
     _parse_func = partial(
         _parse_doc_parts,
+        ai_provider=ai_provider, # Pass provider
         include_marginalia=include_marginalia,
         include_metadata_in_markdown=include_metadata_in_markdown,
     )
@@ -461,29 +476,32 @@ def _parse_doc_in_parallel(
 def _parse_doc_parts(
     doc: Document,
     *,
+    ai_provider: BaseAIProvider, # Added ai_provider
     include_marginalia: bool = True,
     include_metadata_in_markdown: bool = True,
 ) -> ParsedDocument:
     try:
-        _LOGGER.info(f"Start parsing document part: '{doc}'")
-        result = _send_parsing_request(
-            str(doc.file_path),
-            include_marginalia=include_marginalia,
-            include_metadata_in_markdown=include_metadata_in_markdown,
-        )
-        _LOGGER.info(f"Successfully parsed document part: '{doc}'")
-        return ParsedDocument.model_validate(
-            {
-                **result["data"],
-                "errors": result.get("errors", []),
-                "start_page_idx": doc.start_page_idx,
-                "end_page_idx": doc.end_page_idx,
-                "doc_type": "pdf",
-            }
-        )
+        _LOGGER.info(f"Start parsing document part with AI provider: '{doc}'")
+        options = {
+            "include_marginalia": include_marginalia,
+            "include_metadata_in_markdown": include_metadata_in_markdown,
+            "doc_type": "pdf",  # The original document was a PDF
+            "start_page_idx": doc.start_page_idx, # Context for this chunk
+            "end_page_idx": doc.end_page_idx,     # Context for this chunk
+        }
+        # The file at doc.file_path is the actual PDF chunk (potentially multiple pages if split_size > 1)
+        # The provider's analyze_document will handle this file.
+        parsed_doc = ai_provider.analyze_document(str(doc.file_path), options)
+        if parsed_doc.errors:
+            for err in parsed_doc.errors:
+                _LOGGER.error(f"Provider error parsing doc part '{doc.file_path}': {err.error_code} - {err.error}", page_num=err.page_num)
+        else:
+            _LOGGER.info(f"Successfully parsed document part with AI provider: '{doc}'")
+        return parsed_doc
     except Exception as e:
+        # This catches errors from the analyze_document call itself
         error_msg = str(e)
-        _LOGGER.error(f"Error parsing document '{doc}' due to: {error_msg}")
+        _LOGGER.error(f"Exception during PDF part parsing with AI provider '{doc}': {error_msg}")
         errors = [
             PageError(page_num=i, error=error_msg, error_code=-1)
             for i in range(doc.start_page_idx, doc.end_page_idx + 1)
@@ -497,60 +515,4 @@ def _parse_doc_parts(
             result_path=Path(doc.file_path),
             errors=errors,
         )
-
-
-@tenacity.retry(
-    wait=tenacity.wait_exponential_jitter(
-        exp_base=1.5, initial=1, max=settings.max_retry_wait_time, jitter=10
-    ),
-    stop=tenacity.stop_after_attempt(settings.max_retries),
-    retry=tenacity.retry_if_exception_type(RetryableError),
-    after=log_retry_failure,
-)
-def _send_parsing_request(
-    file_path: str,
-    *,
-    include_marginalia: bool = True,
-    include_metadata_in_markdown: bool = True,
-) -> dict[str, Any]:
-    """
-    Send a parsing request to the Landing AI Agentic Document Analysis API.
-
-    Args:
-        file_path (str): The path to the document file.
-        include_marginalia (bool, optional): Whether to include marginalia in the analysis. Defaults to True.
-        include_metadata_in_markdown (bool, optional): Whether to include metadata in the markdown output. Defaults to True.
-
-    Returns:
-        dict[str, Any]: The parsed document data.
-    """
-    with Timer() as timer:
-        file_type = "pdf" if Path(file_path).suffix.lower() == ".pdf" else "image"
-        # TODO: check if the file extension is a supported image type
-        with open(file_path, "rb") as file:
-            files = {file_type: file}
-            data = {
-                "include_marginalia": include_marginalia,
-                "include_metadata_in_markdown": include_metadata_in_markdown,
-            }
-            headers = {
-                "Authorization": f"Basic {settings.vision_agent_api_key}",
-                "runtime_tag": f"agentic-doc-v{_LIB_VERSION}",
-            }
-            response = httpx.post(
-                _ENDPOINT_URL,
-                files=files,
-                data=data,
-                headers=headers,
-                timeout=None,
-            )
-            if response.status_code in [408, 429, 502, 503, 504]:
-                raise RetryableError(response)
-
-            response.raise_for_status()
-
-    _LOGGER.info(
-        f"Time taken to successfully parse a document chunk: {timer.elapsed:.2f} seconds"
-    )
-    result: dict[str, Any] = response.json()
-    return result
+# _send_parsing_request has been removed and its logic moved to LandingAIProvider.analyze_document
